@@ -48,6 +48,7 @@ def generate_launch_description():
             "field_position_yaw_offset": 1.57079632679,
             "field_position_scale_x": 1.0,
             "field_position_scale_y": 1.0,
+            "camera_forward_offset_m": 0.17,
             "auto_position_alignment": False,
             "reset_origin_on_start": True,
             "waypoint_reach_dist": 8.0,

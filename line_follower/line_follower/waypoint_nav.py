@@ -206,6 +206,7 @@ class WaypointNavigator(Node):
         self.declare_parameter("field_position_yaw_offset", math.pi / 2.0)
         self.declare_parameter("field_position_scale_x", 1.0)
         self.declare_parameter("field_position_scale_y", 1.0)
+        self.declare_parameter("camera_forward_offset_m", 0.17)
         self.declare_parameter("auto_position_alignment", False)
         self.declare_parameter("reset_origin_on_start", True)
         self.declare_parameter("waypoint_reach_dist", 8.0)     # 到达航点距离阈值 cm
@@ -231,6 +232,7 @@ class WaypointNavigator(Node):
         self.field_position_yaw_offset = self.get_parameter("field_position_yaw_offset").value
         self.field_position_scale_x = self.get_parameter("field_position_scale_x").value
         self.field_position_scale_y = self.get_parameter("field_position_scale_y").value
+        self.camera_forward_offset_m = self.get_parameter("camera_forward_offset_m").value
         self.auto_position_alignment = self.get_parameter("auto_position_alignment").value
         self.reset_origin_on_start = self.get_parameter("reset_origin_on_start").value
         self.waypoint_reach_dist = self.get_parameter("waypoint_reach_dist").value
@@ -261,6 +263,10 @@ class WaypointNavigator(Node):
         self._origin_yaw = 0.0
         self._heading_yaw_delta = 0.0
         self._position_yaw_delta = self.field_position_yaw_offset
+        self._camera_raw_x = 0.0
+        self._camera_raw_y = 0.0
+        self._raw_forward_x = 1.0
+        self._raw_forward_y = 0.0
         self._raw_x = 0.0
         self._raw_y = 0.0
         self._raw_yaw = 0.0
@@ -305,13 +311,32 @@ class WaypointNavigator(Node):
     # ==================== 回调 ====================
 
     def _on_pose(self, msg: PoseStamped) -> None:
-        raw_x = msg.pose.position.x
-        raw_y = msg.pose.position.y
+        camera_raw_x = msg.pose.position.x
+        camera_raw_y = msg.pose.position.y
 
         q = msg.pose.orientation
         siny = 2.0 * (q.w * q.z + q.x * q.y)
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         raw_yaw = math.atan2(siny, cosy)
+
+        # The VIO pose is measured at the camera/navigation unit, mounted ahead of
+        # the car center. Use the camera body's forward axis projection in VIO XY.
+        forward_x = 2.0 * (q.x * q.z + q.w * q.y)
+        forward_y = 2.0 * (q.y * q.z - q.w * q.x)
+        forward_norm = math.hypot(forward_x, forward_y)
+        if forward_norm > 1e-6:
+            forward_x /= forward_norm
+            forward_y /= forward_norm
+        else:
+            forward_x = math.cos(raw_yaw)
+            forward_y = math.sin(raw_yaw)
+
+        raw_x = camera_raw_x - self.camera_forward_offset_m * forward_x
+        raw_y = camera_raw_y - self.camera_forward_offset_m * forward_y
+        self._camera_raw_x = camera_raw_x
+        self._camera_raw_y = camera_raw_y
+        self._raw_forward_x = forward_x
+        self._raw_forward_y = forward_y
         self._raw_x = raw_x
         self._raw_y = raw_y
         self._raw_yaw = raw_yaw
@@ -576,6 +601,11 @@ class WaypointNavigator(Node):
             "raw_y": round(self._raw_y, 3),
             "raw_dx": round(self._raw_dx, 3),
             "raw_dy": round(self._raw_dy, 3),
+            "camera_raw_x": round(self._camera_raw_x, 3),
+            "camera_raw_y": round(self._camera_raw_y, 3),
+            "camera_forward_x": round(self._raw_forward_x, 3),
+            "camera_forward_y": round(self._raw_forward_y, 3),
+            "camera_offset_m": round(self.camera_forward_offset_m, 3),
         }, ensure_ascii=False)
         self.status_pub.publish(msg)
 
@@ -596,7 +626,8 @@ class WaypointNavigator(Node):
             f"yaw={math.degrees(raw_yaw):.1f}° -> A=({self.field_start_x:.2f},{self.field_start_y:.2f}), "
             f"pos_offset={math.degrees(self._position_yaw_delta):.1f}°, "
             f"heading_offset={math.degrees(self._heading_yaw_delta):.1f}°, "
-            f"scale=({self.field_position_scale_x:.2f},{self.field_position_scale_y:.2f})"
+            f"scale=({self.field_position_scale_x:.2f},{self.field_position_scale_y:.2f}), "
+            f"camera_offset={self.camera_forward_offset_m:.2f}m"
         )
 
     def _straight_progress(self, wp: Waypoint) -> tuple[float, float]:
