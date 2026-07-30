@@ -1,0 +1,22 @@
+/**:
+  ros__parameters:
+    # ---- 定位 ----
+    pose_topic: "/camera/camera/vio_100hz"
+
+    # ---- 航点到达阈值 (cm) ----
+    waypoint_reach_dist: 8.0    # 中途航点到达距离
+    final_reach_dist: 5.0       # 回到A的到达距离
+
+    # ---- PID 参数 ----
+    kp_angular: 1.8             # 角度控制P (越大转向越猛)
+    kp_linear: 0.6              # 速度控制P (越大加速越猛)
+
+    # ---- 速度限幅 ----
+    max_linear_speed: 0.4       # 最大前进速度 m/s
+    max_angular_speed: 0.8      # 最大角速度 rad/s
+
+    # ---- 减速 ----
+    slow_down_dist: 30.0        # 距航点多远开始减速 (cm)
+
+    # ---- 安全 ----
+    lost_timeout: 1.0           # 定位丢失超时停车 (s)

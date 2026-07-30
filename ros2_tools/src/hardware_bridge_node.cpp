@@ -29,7 +29,7 @@
 #include <array>
 
 // 默认串口
-constexpr char DEFAULT_SERIAL_PORT[] = "/dev/ttyCH341USB0";
+constexpr char DEFAULT_SERIAL_PORT[] = "/dev/car_serial";//适配新串口
 constexpr int DEFAULT_BAUD_RATE = 115200;
 
 // 协议定义

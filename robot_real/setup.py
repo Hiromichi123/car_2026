@@ -8,7 +8,6 @@ setup(
     name=package_name,
     version='1.0.0',
     packages=['scripts'],
-    package_dir={'scripts': 'scripts'},
     data_files=[
         # 必要的 ament index 文件
         ('share/ament_index/resource_index/packages',

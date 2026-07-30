@@ -1,4 +1,4 @@
-int32 command
+int8 command
 ---
 bool success
 string message
