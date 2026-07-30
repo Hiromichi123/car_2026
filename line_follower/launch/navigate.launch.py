@@ -1,9 +1,9 @@
 """
-一键启动航点导航系统 (C++ 版)，launch 后自动开始导航。
+一键启动航点导航系统，等待地面站 /mission/command 后开始一圈任务。
 
 启动节点:
   1. hardware_bridge_node  — 串口桥接 (/cmd_vel → 电机驱动板)
-  2. waypoint_nav          — 航点导航 C++版 (VIO定位 + PID → /cmd_vel)
+  2. waypoint_nav_py       — 比赛胶囊路线任务导航 (VIO定位 + PID → /cmd_vel)
 
 使用:
   ros2 launch line_follower navigate.launch.py
@@ -34,13 +34,16 @@ def generate_launch_description():
         }],
     )
 
-    # 航点导航节点 (C++ 版)
+    # 航点导航节点 (Python 任务版)
     waypoint_nav_node = Node(
         package="line_follower",
-        executable="waypoint_nav",
+        executable="waypoint_nav_py",
         name="waypoint_navigator",
         output="screen",
         parameters=[{
+            "mission_command_topic": "/mission/command",
+            "carrier_pose_topic": "/carrier/lidar_pose",
+            "car_status_topic": "/car/status",
             "kp_angular": 1.8,
             "kp_linear": 0.6,
             "max_linear_speed": 0.4,

@@ -12,11 +12,13 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 add_executable(waypoint_nav src/waypoint_nav.cpp)
 ament_target_dependencies(waypoint_nav rclcpp geometry_msgs)
 
 install(TARGETS waypoint_nav DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS line_follower/waypoint_nav.py DESTINATION lib/${PROJECT_NAME} RENAME waypoint_nav_py)
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 

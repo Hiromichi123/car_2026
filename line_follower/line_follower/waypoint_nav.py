@@ -22,6 +22,7 @@
   - 弧点加密: 12个中间点，更平滑
 """
 import math
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple
@@ -29,7 +30,8 @@ from typing import List, Optional, Tuple
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
+from ros2_tools.msg import LidarPose
 
 
 # ============================================================
@@ -129,22 +131,19 @@ def _semicircle_waypoints(
 
 
 # ============================================================
-# D题地图航点: 跑道形闭环
-#   A(0,0) → B(150,0) 直行
-#   → 右半圆 R=75 → C(150,-150)
-#   → D(0,-150) 直行
-#   → 左半圆 R=75 → 回到 A(0,0)，停车
+# 比赛场地航点: A(150,200) → B(150,350) → C(300,350)
+#   → D(300,200) → A(150,200)，单位 cm。
 # ============================================================
 
 ARC_STEPS = 12  # 半圆中间点数
 
-# 第一个半圆：B(150,0) → C(150,-150)，右转 (顺时针, 曲率负)
+# 上半圆：B(150,350) → C(300,350)，右转 (顺时针, 曲率负)
 _arc1_wps, _arc1_center, _arc1_sign = _semicircle_waypoints(
-    start=(150, 0), end=(150, -150), radius=75, direction="right", steps=ARC_STEPS
+    start=(150, 350), end=(300, 350), radius=75, direction="right", steps=ARC_STEPS
 )
-# 第二个半圆：D(0,-150) → A(0,0)，左转 (逆时针, 曲率正)
+# 下半圆：D(300,200) → A(150,200)，右转 (顺时针, 曲率负)
 _arc2_wps, _arc2_center, _arc2_sign = _semicircle_waypoints(
-    start=(0, -150), end=(0, 0), radius=75, direction="left", steps=ARC_STEPS
+    start=(300, 200), end=(150, 200), radius=75, direction="right", steps=ARC_STEPS
 )
 
 # 直线段航点 helper
@@ -162,23 +161,23 @@ def _straight_wp(x_cm: float, y_cm: float,
 
 DEFAULT_WAYPOINTS: List[Waypoint] = [
     # 0  A 起点
-    _straight_wp(0, 0, 0, 0),
-    # 1  B 直行150cm，线段起点=A
-    _straight_wp(150, 0, 0, 0),
-    # 2-13  右转半圆 R=75 (12个中间点)
+    _straight_wp(150, 200, 150, 200),
+    # 1  B 左侧直线段，线段起点=A
+    _straight_wp(150, 350, 150, 200),
+    # 2-13  上半圆 R=75 (12个中间点)
     *_arc1_wps,
-    # 14  C 半圆终点 (到C后完成弧段)
-    Waypoint(x=1.50, y=-1.50, curvature=_arc1_wps[-1].curvature if _arc1_wps else 0.0,
+    # 14  C 半圆终点
+    Waypoint(x=3.00, y=3.50, curvature=_arc1_wps[-1].curvature if _arc1_wps else 0.0,
              seg_type=SegType.ARC,
              arc_center_x=_arc1_center[0] / 100.0,
              arc_center_y=_arc1_center[1] / 100.0,
              arc_radius=0.75),
-    # 15  D 直行(右→左)，线段起点=C
-    _straight_wp(0, -150, 150, -150),
-    # 16-27 左转半圆 R=75 (12个中间点)
+    # 15  D 右侧直线段，线段起点=C
+    _straight_wp(300, 200, 300, 350),
+    # 16-27 下半圆 R=75 (12个中间点)
     *_arc2_wps,
     # 28  回到A，停车
-    Waypoint(x=0.0, y=0.0, curvature=_arc2_wps[-1].curvature if _arc2_wps else 0.0,
+    Waypoint(x=1.50, y=2.00, curvature=_arc2_wps[-1].curvature if _arc2_wps else 0.0,
              seg_type=SegType.ARC,
              arc_center_x=_arc2_center[0] / 100.0,
              arc_center_y=_arc2_center[1] / 100.0,
@@ -198,6 +197,12 @@ class WaypointNavigator(Node):
 
         # ---- 参数 ----
         self.declare_parameter("pose_topic", "/camera/camera/vio_100hz")
+        self.declare_parameter("mission_command_topic", "/mission/command")
+        self.declare_parameter("carrier_pose_topic", "/carrier/lidar_pose")
+        self.declare_parameter("car_status_topic", "/car/status")
+        self.declare_parameter("field_start_x", 1.50)
+        self.declare_parameter("field_start_y", 2.00)
+        self.declare_parameter("field_start_yaw", math.pi / 2.0)
         self.declare_parameter("waypoint_reach_dist", 8.0)     # 到达航点距离阈值 cm
         self.declare_parameter("final_reach_dist", 5.0)        # 回到A的距离阈值 cm
         self.declare_parameter("kp_angular", 1.8)              # 航向P增益
@@ -211,6 +216,12 @@ class WaypointNavigator(Node):
 
         # 读取参数
         self.pose_topic = self.get_parameter("pose_topic").value
+        self.mission_command_topic = self.get_parameter("mission_command_topic").value
+        self.carrier_pose_topic = self.get_parameter("carrier_pose_topic").value
+        self.car_status_topic = self.get_parameter("car_status_topic").value
+        self.field_start_x = self.get_parameter("field_start_x").value
+        self.field_start_y = self.get_parameter("field_start_y").value
+        self.field_start_yaw = self.get_parameter("field_start_yaw").value
         self.waypoint_reach_dist = self.get_parameter("waypoint_reach_dist").value
         self.final_reach_dist = self.get_parameter("final_reach_dist").value
         self.kp_angular = self.get_parameter("kp_angular").value
@@ -232,56 +243,93 @@ class WaypointNavigator(Node):
         self._pose_y = 0.0
         self._pose_yaw = 0.0
         self._pose_received = False
+        self._local_origin_ready = False
+        self._origin_x = 0.0
+        self._origin_y = 0.0
+        self._origin_yaw = 0.0
         self._last_pose_time = self.get_clock().now()
         self._cmd_seq = 0
+        self._task_id = 0
 
         # ---- 发布/订阅 ----
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.state_pub = self.create_publisher(Bool, "/nav/started", 10)
+        self.carrier_pose_pub = self.create_publisher(LidarPose, self.carrier_pose_topic, 10)
+        self.status_pub = self.create_publisher(String, self.car_status_topic, 10)
 
         self.pose_sub = self.create_subscription(
             PoseStamped, self.pose_topic, self._on_pose, 10)
 
         # ---- 定时器 ----
         self.ctrl_timer = self.create_timer(0.02, self._control_loop)
-        self.status_timer = self.create_timer(1.0, self._print_status)
+        self.status_timer = self.create_timer(0.5, self._print_status)
         self.watchdog_timer = self.create_timer(0.2, self._watchdog)
+        self.pose_publish_timer = self.create_timer(0.05, self._publish_carrier_pose)
 
         self.get_logger().info(
             f"WaypointNavigator v2 已启动\n"
             f"  定位话题: {self.pose_topic}\n"
+            f"  任务命令: {self.mission_command_topic}\n"
+            f"  航母位姿: {self.carrier_pose_topic}\n"
             f"  航点数: {len(self.waypoints)}\n"
             f"  弧段中间点: {ARC_STEPS}/半圆\n"
             f"  前馈增益: {self.ff_gain}, 横向误差增益: {self.kp_crosstrack}\n"
             f"  等待启动指令..."
         )
         self.get_logger().info(
-            "  发送: ros2 topic pub /nav/start std_msgs/msg/Bool '{data: true}' -1"
+            "  发送: ros2 topic pub /mission/command std_msgs/msg/String '{data: \"{\\\"command\\\":\\\"start\\\",\\\"task\\\":1}\"}' -1"
         )
 
         self.start_sub = self.create_subscription(
-            Bool, "/nav/start", self._on_start, 10)
+            String, self.mission_command_topic, self._on_mission_command, 10)
 
     # ==================== 回调 ====================
 
     def _on_pose(self, msg: PoseStamped) -> None:
-        self._pose_x = msg.pose.position.x
-        self._pose_y = msg.pose.position.y
+        raw_x = msg.pose.position.x
+        raw_y = msg.pose.position.y
 
         q = msg.pose.orientation
         siny = 2.0 * (q.w * q.z + q.x * q.y)
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        self._pose_yaw = math.atan2(siny, cosy)
+        raw_yaw = math.atan2(siny, cosy)
+
+        if not self._local_origin_ready:
+            self._origin_x = raw_x
+            self._origin_y = raw_y
+            self._origin_yaw = raw_yaw
+            self._local_origin_ready = True
+            self.get_logger().info(
+                f"场地坐标对齐: VIO origin=({raw_x:.2f},{raw_y:.2f}) "
+                f"yaw={math.degrees(raw_yaw):.1f}° -> A=({self.field_start_x:.2f},{self.field_start_y:.2f})"
+            )
+
+        dx = raw_x - self._origin_x
+        dy = raw_y - self._origin_y
+        yaw_delta = self.field_start_yaw - self._origin_yaw
+        cos_d = math.cos(yaw_delta)
+        sin_d = math.sin(yaw_delta)
+        self._pose_x = self.field_start_x + cos_d * dx - sin_d * dy
+        self._pose_y = self.field_start_y + sin_d * dx + cos_d * dy
+        self._pose_yaw = self._normalize_angle(raw_yaw + yaw_delta)
 
         self._pose_received = True
         self._last_pose_time = self.get_clock().now()
 
-    def _on_start(self, msg: Bool) -> None:
-        if msg.data and self._state == "IDLE":
-            self.get_logger().info("=== 收到启动指令，开始巡线 ===")
+    def _on_mission_command(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warn(f"忽略非法任务命令: {msg.data}")
+            return
+
+        if payload.get("command") == "start" and self._state in ("IDLE", "STOPPED"):
+            self._task_id = int(payload.get("task", 1))
+            self.get_logger().info(f"=== 收到任务{self._task_id}启动指令，开始循线一圈 ===")
             self._state = "FOLLOWING"
             self._wp_index = 0
             self.state_pub.publish(Bool(data=True))
+            self._publish_status("RUNNING", "mission command accepted")
 
     # ==================== 控制循环 50Hz ====================
 
@@ -397,6 +445,7 @@ class WaypointNavigator(Node):
         self._publish_cmd(0.0, 0.0)
         self._state = "STOPPED"
         self.state_pub.publish(Bool(data=False))
+        self._publish_status("FINISH", "one lap complete at A")
 
     def _watchdog(self) -> None:
         if self._state != "FOLLOWING":
@@ -408,6 +457,7 @@ class WaypointNavigator(Node):
             self._publish_cmd(0.0, 0.0)
 
     def _print_status(self) -> None:
+        self._publish_status(self._state, "periodic status")
         if self._state == "FOLLOWING" and self._wp_index < len(self.waypoints):
             wp = self.waypoints[self._wp_index]
             dx = wp.x - self._pose_x
@@ -430,6 +480,33 @@ class WaypointNavigator(Node):
         cmd.angular.z = angular_z
         self.cmd_pub.publish(cmd)
         self._cmd_seq += 1
+
+    def _publish_carrier_pose(self) -> None:
+        if not self._pose_received:
+            return
+        msg = LidarPose()
+        msg.x = float(self._pose_x)
+        msg.y = float(self._pose_y)
+        msg.z = 0.0
+        msg.roll = 0.0
+        msg.pitch = 0.0
+        msg.yaw = float(self._pose_yaw)
+        self.carrier_pose_pub.publish(msg)
+
+    def _publish_status(self, state: str, detail: str) -> None:
+        msg = String()
+        msg.data = json.dumps({
+            "role": "car",
+            "task": self._task_id,
+            "state": state,
+            "detail": detail,
+            "wp_index": self._wp_index,
+            "wp_count": len(self.waypoints),
+            "x": round(self._pose_x, 3),
+            "y": round(self._pose_y, 3),
+            "yaw": round(self._pose_yaw, 3),
+        }, ensure_ascii=False)
+        self.status_pub.publish(msg)
 
     @staticmethod
     def _normalize_angle(angle: float) -> float:
