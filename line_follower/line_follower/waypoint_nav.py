@@ -215,6 +215,7 @@ class WaypointNavigator(Node):
         self.declare_parameter("slow_down_dist", 30.0)         # 接近航点时减速距离 cm
         self.declare_parameter("lost_timeout", 1.0)            # 定位丢失超时 s
         self.declare_parameter("feedforward_gain", 0.7)        # 曲率前馈增益 (0~1)
+        self.declare_parameter("allow_waypoint_overshoot_reach", True)
 
         # 读取参数
         self.pose_topic = self.get_parameter("pose_topic").value
@@ -236,6 +237,7 @@ class WaypointNavigator(Node):
         self.slow_down_dist = self.get_parameter("slow_down_dist").value
         self.lost_timeout = self.get_parameter("lost_timeout").value
         self.ff_gain = self.get_parameter("feedforward_gain").value
+        self.allow_waypoint_overshoot_reach = self.get_parameter("allow_waypoint_overshoot_reach").value
 
         # 航点
         self.waypoints: List[Waypoint] = DEFAULT_WAYPOINTS
@@ -370,15 +372,18 @@ class WaypointNavigator(Node):
             else self.waypoint_reach_dist / 100.0
         )
 
-        if dist < reach_thresh:
+        reached_by_distance = dist < reach_thresh
+        reached_by_overshoot = self._has_passed_straight_waypoint(wp, reach_thresh)
+        if reached_by_distance or reached_by_overshoot:
             if is_final:
                 self._on_lap_complete()
                 return
             else:
                 self._wp_index += 1
                 next_wp = self.waypoints[self._wp_index]
+                reach_reason = "距离阈值" if reached_by_distance else "越过目标投影"
                 self.get_logger().info(
-                    f"到达航点 {self._wp_index - 1}/{len(self.waypoints) - 1}, "
+                    f"到达航点 {self._wp_index - 1}/{len(self.waypoints) - 1} ({reach_reason}), "
                     f"下一目标: #{self._wp_index} ({next_wp.x:.2f}, {next_wp.y:.2f})"
                     + (f" 曲率={next_wp.curvature:.2f}" if next_wp.curvature != 0 else "")
                 )
@@ -447,6 +452,24 @@ class WaypointNavigator(Node):
             # 2D 叉积: u × r = ux*ry - uy*rx
             # 正 = 点在方向向量右侧, 负 = 点在左侧
             return ux * ry - uy * rx
+
+    def _has_passed_straight_waypoint(self, wp: Waypoint, reach_thresh: float) -> bool:
+        if not self.allow_waypoint_overshoot_reach or wp.seg_type != SegType.STRAIGHT:
+            return False
+
+        seg_dx = wp.x - wp.line_start_x
+        seg_dy = wp.y - wp.line_start_y
+        seg_len = math.hypot(seg_dx, seg_dy)
+        if seg_len < 0.001:
+            return False
+
+        ux, uy = seg_dx / seg_len, seg_dy / seg_len
+        rx = self._pose_x - wp.line_start_x
+        ry = self._pose_y - wp.line_start_y
+        along_track = ux * rx + uy * ry
+        cross_track = abs(ux * ry - uy * rx)
+
+        return along_track >= seg_len and cross_track <= max(0.30, 3.0 * reach_thresh)
 
     # ==================== 状态机 ====================
 
