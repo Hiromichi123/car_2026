@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-航点导航节点：基于VIO定位，按预设航点闭环巡线一圈。
+航点导航节点：基于 MID360/Point-LIO 定位，按预设航点闭环巡线一圈。
 
 订阅:
   /lidar_data (LidarPose)                — MID360/PointLIO定位
@@ -11,7 +11,7 @@
   IDLE → 收到启动信号 → FOLLOWING(逐个航点) → 回到A → STOPPED
 
 坐标系说明:
-  - 小车在A点上电，VIO以当前位姿为原点 → A = (0, 0)
+  - 小车在A点上电，MID360/Point-LIO以当前位姿为原点 → A = (0, 0)
   - X 轴：场地横向 (0~400 cm)，正方向向右
   - Y 轴：场地纵向 (0~500 cm)，正方向向前（小车前进方向）
   - 航点坐标即场地绝对坐标，单位 cm，内部转换为 m 使用
@@ -19,7 +19,7 @@
 半圆追踪优化 (v2):
   - 曲率前馈: 弧段预加 ω_ff = v / R，消除弯道稳态滞后
   - 横向误差修正: 直道计算到线段的垂直距离，弯道计算到圆弧的径向误差
-  - 弧点加密: 12个中间点，更平滑
+  - 弧点加密: 5个中间点，减少弯道逐点到达等待
 """
 import math
 import json
@@ -135,7 +135,7 @@ def _semicircle_waypoints(
 #   → D(300,200) → A(150,200)，单位 cm。
 # ============================================================
 
-ARC_STEPS = 12  # 半圆中间点数
+ARC_STEPS = 5  # 半圆中间点数
 
 # 上半圆：B(150,350) → C(300,350)，右转 (顺时针, 曲率负)
 _arc1_wps, _arc1_center, _arc1_sign = _semicircle_waypoints(
@@ -164,19 +164,19 @@ DEFAULT_WAYPOINTS: List[Waypoint] = [
     _straight_wp(150, 200, 150, 200),
     # 1  B 左侧直线段，线段起点=A
     _straight_wp(150, 350, 150, 200),
-    # 2-13  上半圆 R=75 (12个中间点)
+    # 上半圆 R=75
     *_arc1_wps,
-    # 14  C 半圆终点
+    # C 半圆终点
     Waypoint(x=3.00, y=3.50, curvature=_arc1_wps[-1].curvature if _arc1_wps else 0.0,
              seg_type=SegType.ARC,
              arc_center_x=_arc1_center[0] / 100.0,
              arc_center_y=_arc1_center[1] / 100.0,
              arc_radius=0.75),
-    # 15  D 右侧直线段，线段起点=C
+    # D 右侧直线段，线段起点=C
     _straight_wp(300, 200, 300, 350),
-    # 16-27 下半圆 R=75 (12个中间点)
+    # 下半圆 R=75
     *_arc2_wps,
-    # 28  回到A，停车
+    # 回到A，停车
     Waypoint(x=1.50, y=2.00, curvature=_arc2_wps[-1].curvature if _arc2_wps else 0.0,
              seg_type=SegType.ARC,
              arc_center_x=_arc2_center[0] / 100.0,
@@ -210,14 +210,14 @@ class WaypointNavigator(Node):
         self.declare_parameter("camera_forward_offset_m", 0.0)
         self.declare_parameter("auto_position_alignment", False)
         self.declare_parameter("reset_origin_on_start", True)
-        self.declare_parameter("waypoint_reach_dist", 8.0)     # 到达航点距离阈值 cm
+        self.declare_parameter("waypoint_reach_dist", 11.0)     # 到达航点距离阈值 cm
         self.declare_parameter("final_reach_dist", 5.0)        # 回到A的距离阈值 cm
         self.declare_parameter("kp_angular", 1.8)              # 航向P增益
         self.declare_parameter("kp_crosstrack", 1.2)           # 横向误差P增益
-        self.declare_parameter("kp_linear", 0.6)               # 速度比例
-        self.declare_parameter("max_linear_speed", 0.4)        # 最大前进速度 m/s
+        self.declare_parameter("kp_linear", 0.6)               # 线速度p
+        self.declare_parameter("max_linear_speed", 0.3)        # 最大前进速度 m/s
         self.declare_parameter("max_angular_speed", 0.8)       # 最大角速度 rad/s
-        self.declare_parameter("slow_down_dist", 30.0)         # 接近航点时减速距离 cm
+        self.declare_parameter("slow_down_dist", 20.0)         # 接近航点时减速距离 cm
         self.declare_parameter("lost_timeout", 1.0)            # 定位丢失超时 s
         self.declare_parameter("feedforward_gain", 0.7)        # 曲率前馈增益 (0~1)
         self.declare_parameter("allow_waypoint_overshoot_reach", True)

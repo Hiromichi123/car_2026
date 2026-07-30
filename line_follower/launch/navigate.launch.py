@@ -30,7 +30,7 @@ def generate_launch_description():
         "baud_rate", default_value="115200"
     )
     real_robot_odom_topic_arg = DeclareLaunchArgument(
-        "real_robot_odom_topic", default_value="/Odometry"
+        "real_robot_odom_topic", default_value="/aft_mapped_to_init"
     )
 
     livox_ros_driver = IncludeLaunchDescription(
@@ -47,7 +47,7 @@ def generate_launch_description():
         package="tf2_ros",
         executable="static_transform_publisher",
         name="base_to_livox_tf",
-        arguments=["0", "0", "0", "0", "0", "0", "1", "base_link", "livox_frame"],
+        arguments=["0.135", "0", "0", "0", "0", "0", "1", "base_link", "livox_frame"],
     )
 
     slam = TimerAction(
@@ -75,6 +75,8 @@ def generate_launch_description():
             "use_simulation": False,
             "simulation_odom_topic": "/absolute_pose",
             "real_robot_odom_topic": LaunchConfiguration("real_robot_odom_topic"),
+            "lidar_forward_offset_m": 0.135,
+            "reset_origin_on_start": True,
         }],
     )
 
@@ -109,13 +111,13 @@ def generate_launch_description():
             "camera_forward_offset_m": 0.0,
             "auto_position_alignment": False,
             "reset_origin_on_start": True,
-            "waypoint_reach_dist": 8.0,
+            "waypoint_reach_dist": 11.0,
             "final_reach_dist": 5.0,
             "kp_angular": 2.4,
-            "kp_linear": 0.35,
-            "max_linear_speed": 0.4,
+            "kp_linear": 0.55,
+            "max_linear_speed": 0.3,
             "max_angular_speed": 0.8,
-            "slow_down_dist": 30.0,
+            "slow_down_dist": 20.0,
             "lost_timeout": 1.0,
         }],
     )

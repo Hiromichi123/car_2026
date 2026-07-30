@@ -8,6 +8,8 @@
  * - use_simulation (bool): 是否使用仿真里程计，默认true
  * - simulation_odom_topic (string): 仿真里程计话题，默认"/absolute_pose"
  * - real_robot_odom_topic (string): 实机里程计话题，默认"/aft_mapped_to_init"
+ * - lidar_forward_offset_m (double): 雷达相对车体中心沿车体X正方向偏置，默认0.135m
+ * - reset_origin_on_start (bool): 将首帧车体中心位姿作为局部原点，默认true
  */
 #include <cmath>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -25,10 +27,14 @@ public:
         this->declare_parameter<bool>("use_simulation", false);
         this->declare_parameter<std::string>("simulation_odom_topic", "/absolute_pose");
         this->declare_parameter<std::string>("real_robot_odom_topic", "/aft_mapped_to_init");
+        this->declare_parameter<double>("lidar_forward_offset_m", 0.135);
+        this->declare_parameter<bool>("reset_origin_on_start", true);
         // 获取参数值
         using_gazebo_ = this->get_parameter("use_simulation").as_bool();
         std::string sim_topic = this->get_parameter("simulation_odom_topic").as_string();
         std::string real_topic = this->get_parameter("real_robot_odom_topic").as_string();
+        lidar_forward_offset_m_ = this->get_parameter("lidar_forward_offset_m").as_double();
+        reset_origin_on_start_ = this->get_parameter("reset_origin_on_start").as_bool();
         
         // 设置QoS，某些情况下
         //rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
@@ -48,6 +54,8 @@ public:
             sim_topic, 10, 
             [this](const nav_msgs::msg::Odometry::SharedPtr msg){ LidarDataNode::odomCallback(msg);});
         RCLCPP_INFO(this->get_logger(), "创建仿真odom订阅: %s", sim_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "雷达前向偏置补偿: %.3f m", lidar_forward_offset_m_);
+        RCLCPP_INFO(this->get_logger(), "启动原点重置: %s", reset_origin_on_start_ ? "true" : "false");
     }
 
     // 兼容版odom回调
@@ -72,17 +80,36 @@ public:
         if (pitch < 0) pitch += 2 * M_PI;
         if (yaw < 0) yaw += 2 * M_PI;
 
-        // 填充并发布LidarPose消息
-        lidar_pose.x = x;
-        lidar_pose.y = y;
-        lidar_pose.z = z;
+        // Point-LIO输出的是雷达中心位姿。雷达位于车体中心X正方向时，
+        // 导航需要将位置换算回车体中心。
+        const double base_x = x - lidar_forward_offset_m_ * std::cos(yaw);
+        const double base_y = y - lidar_forward_offset_m_ * std::sin(yaw);
+        if (reset_origin_on_start_ && !origin_ready_) {
+            origin_x_ = base_x;
+            origin_y_ = base_y;
+            origin_z_ = z;
+            origin_ready_ = true;
+            RCLCPP_INFO(
+                this->get_logger(),
+                "记录车体中心局部原点: (%.3f, %.3f, %.3f)",
+                origin_x_, origin_y_, origin_z_);
+        }
+
+        const double out_x = reset_origin_on_start_ ? base_x - origin_x_ : base_x;
+        const double out_y = reset_origin_on_start_ ? base_y - origin_y_ : base_y;
+        const double out_z = reset_origin_on_start_ ? z - origin_z_ : z;
+
+        // 填充并发布车体中心LidarPose消息
+        lidar_pose.x = out_x;
+        lidar_pose.y = out_y;
+        lidar_pose.z = out_z;
         lidar_pose.roll = roll;
         lidar_pose.pitch = pitch;
         lidar_pose.yaw = yaw;
 
         lidar_pub->publish(lidar_pose);
 
-        log(x, y, z, roll, pitch, yaw); // 低频打印日志
+        log(out_x, out_y, out_z, roll, pitch, yaw); // 低频打印日志
     }
 
     // 低频打印当前位姿日志
@@ -97,6 +124,12 @@ public:
 
 private:
     bool using_gazebo_; // 仿真开关
+    double lidar_forward_offset_m_;
+    bool reset_origin_on_start_;
+    bool origin_ready_ = false;
+    double origin_x_ = 0.0;
+    double origin_y_ = 0.0;
+    double origin_z_ = 0.0;
     
     rclcpp::Publisher<ros2_tools::msg::LidarPose>::SharedPtr lidar_pub;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;

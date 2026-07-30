@@ -24,6 +24,8 @@ def generate_launch_description():
             'use_simulation': False, # 是否使用仿真模式
             'simulation_odom_topic': '/absolute_pose', # 仅在仿真中使用
             'real_robot_odom_topic': '/aft_mapped_to_init', # 实际机器人里使用
+            'lidar_forward_offset_m': 0.135, # MID360位于车体中心X正方向135mm
+            'reset_origin_on_start': True,
         }]
     )
 
