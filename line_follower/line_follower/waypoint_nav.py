@@ -203,6 +203,8 @@ class WaypointNavigator(Node):
         self.declare_parameter("field_start_x", 1.50)
         self.declare_parameter("field_start_y", 2.00)
         self.declare_parameter("field_start_yaw", math.pi / 2.0)
+        self.declare_parameter("field_position_yaw_offset", math.pi / 2.0)
+        self.declare_parameter("auto_position_alignment", False)
         self.declare_parameter("waypoint_reach_dist", 8.0)     # 到达航点距离阈值 cm
         self.declare_parameter("final_reach_dist", 5.0)        # 回到A的距离阈值 cm
         self.declare_parameter("kp_angular", 1.8)              # 航向P增益
@@ -222,6 +224,8 @@ class WaypointNavigator(Node):
         self.field_start_x = self.get_parameter("field_start_x").value
         self.field_start_y = self.get_parameter("field_start_y").value
         self.field_start_yaw = self.get_parameter("field_start_yaw").value
+        self.field_position_yaw_offset = self.get_parameter("field_position_yaw_offset").value
+        self.auto_position_alignment = self.get_parameter("auto_position_alignment").value
         self.waypoint_reach_dist = self.get_parameter("waypoint_reach_dist").value
         self.final_reach_dist = self.get_parameter("final_reach_dist").value
         self.kp_angular = self.get_parameter("kp_angular").value
@@ -247,6 +251,8 @@ class WaypointNavigator(Node):
         self._origin_x = 0.0
         self._origin_y = 0.0
         self._origin_yaw = 0.0
+        self._heading_yaw_delta = 0.0
+        self._position_yaw_delta = self.field_position_yaw_offset
         self._last_pose_time = self.get_clock().now()
         self._cmd_seq = 0
         self._task_id = 0
@@ -298,20 +304,24 @@ class WaypointNavigator(Node):
             self._origin_x = raw_x
             self._origin_y = raw_y
             self._origin_yaw = raw_yaw
+            self._heading_yaw_delta = self.field_start_yaw - self._origin_yaw
+            if self.auto_position_alignment:
+                self._position_yaw_delta = self._heading_yaw_delta
             self._local_origin_ready = True
             self.get_logger().info(
                 f"场地坐标对齐: VIO origin=({raw_x:.2f},{raw_y:.2f}) "
-                f"yaw={math.degrees(raw_yaw):.1f}° -> A=({self.field_start_x:.2f},{self.field_start_y:.2f})"
+                f"yaw={math.degrees(raw_yaw):.1f}° -> A=({self.field_start_x:.2f},{self.field_start_y:.2f}), "
+                f"pos_offset={math.degrees(self._position_yaw_delta):.1f}°, "
+                f"heading_offset={math.degrees(self._heading_yaw_delta):.1f}°"
             )
 
         dx = raw_x - self._origin_x
         dy = raw_y - self._origin_y
-        yaw_delta = self.field_start_yaw - self._origin_yaw
-        cos_d = math.cos(yaw_delta)
-        sin_d = math.sin(yaw_delta)
+        cos_d = math.cos(self._position_yaw_delta)
+        sin_d = math.sin(self._position_yaw_delta)
         self._pose_x = self.field_start_x + cos_d * dx - sin_d * dy
         self._pose_y = self.field_start_y + sin_d * dx + cos_d * dy
-        self._pose_yaw = self._normalize_angle(raw_yaw + yaw_delta)
+        self._pose_yaw = self._normalize_angle(raw_yaw + self._heading_yaw_delta)
 
         self._pose_received = True
         self._last_pose_time = self.get_clock().now()
