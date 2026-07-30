@@ -3,7 +3,7 @@
 航点导航节点：基于VIO定位，按预设航点闭环巡线一圈。
 
 订阅:
-  /camera/camera/vio_100hz (PoseStamped) — VIO定位, 100Hz
+  /lidar_data (LidarPose)                — MID360/PointLIO定位
 发布:
   /cmd_vel (Twist)                      — 差速底盘速度指令
 
@@ -196,7 +196,8 @@ class WaypointNavigator(Node):
         super().__init__("waypoint_navigator")
 
         # ---- 参数 ----
-        self.declare_parameter("pose_topic", "/camera/camera/vio_100hz")
+        self.declare_parameter("pose_topic", "/lidar_data")
+        self.declare_parameter("pose_source", "lidar_pose")
         self.declare_parameter("mission_command_topic", "/mission/command")
         self.declare_parameter("carrier_pose_topic", "/carrier/lidar_pose")
         self.declare_parameter("car_status_topic", "/car/status")
@@ -206,7 +207,7 @@ class WaypointNavigator(Node):
         self.declare_parameter("field_position_yaw_offset", math.pi / 2.0)
         self.declare_parameter("field_position_scale_x", 1.0)
         self.declare_parameter("field_position_scale_y", 1.0)
-        self.declare_parameter("camera_forward_offset_m", 0.17)
+        self.declare_parameter("camera_forward_offset_m", 0.0)
         self.declare_parameter("auto_position_alignment", False)
         self.declare_parameter("reset_origin_on_start", True)
         self.declare_parameter("waypoint_reach_dist", 8.0)     # 到达航点距离阈值 cm
@@ -223,6 +224,7 @@ class WaypointNavigator(Node):
 
         # 读取参数
         self.pose_topic = self.get_parameter("pose_topic").value
+        self.pose_source = self.get_parameter("pose_source").value
         self.mission_command_topic = self.get_parameter("mission_command_topic").value
         self.carrier_pose_topic = self.get_parameter("carrier_pose_topic").value
         self.car_status_topic = self.get_parameter("car_status_topic").value
@@ -282,8 +284,12 @@ class WaypointNavigator(Node):
         self.carrier_pose_pub = self.create_publisher(LidarPose, self.carrier_pose_topic, 10)
         self.status_pub = self.create_publisher(String, self.car_status_topic, 10)
 
-        self.pose_sub = self.create_subscription(
-            PoseStamped, self.pose_topic, self._on_pose, 10)
+        if self.pose_source == "pose_stamped":
+            self.pose_sub = self.create_subscription(
+                PoseStamped, self.pose_topic, self._on_pose_stamped, 10)
+        else:
+            self.pose_sub = self.create_subscription(
+                LidarPose, self.pose_topic, self._on_lidar_pose, 10)
 
         # ---- 定时器 ----
         self.ctrl_timer = self.create_timer(0.02, self._control_loop)
@@ -293,7 +299,7 @@ class WaypointNavigator(Node):
 
         self.get_logger().info(
             f"WaypointNavigator v2 已启动\n"
-            f"  定位话题: {self.pose_topic}\n"
+            f"  定位话题: {self.pose_topic} ({self.pose_source})\n"
             f"  任务命令: {self.mission_command_topic}\n"
             f"  航母位姿: {self.carrier_pose_topic}\n"
             f"  航点数: {len(self.waypoints)}\n"
@@ -310,7 +316,18 @@ class WaypointNavigator(Node):
 
     # ==================== 回调 ====================
 
-    def _on_pose(self, msg: PoseStamped) -> None:
+    def _on_lidar_pose(self, msg: LidarPose) -> None:
+        self._update_raw_pose(
+            raw_x=float(msg.x),
+            raw_y=float(msg.y),
+            raw_yaw=float(msg.yaw),
+            camera_raw_x=float(msg.x),
+            camera_raw_y=float(msg.y),
+            forward_x=math.cos(float(msg.yaw)),
+            forward_y=math.sin(float(msg.yaw)),
+        )
+
+    def _on_pose_stamped(self, msg: PoseStamped) -> None:
         camera_raw_x = msg.pose.position.x
         camera_raw_y = msg.pose.position.y
 
@@ -333,6 +350,18 @@ class WaypointNavigator(Node):
 
         raw_x = camera_raw_x - self.camera_forward_offset_m * forward_x
         raw_y = camera_raw_y - self.camera_forward_offset_m * forward_y
+        self._update_raw_pose(raw_x, raw_y, raw_yaw, camera_raw_x, camera_raw_y, forward_x, forward_y)
+
+    def _update_raw_pose(
+        self,
+        raw_x: float,
+        raw_y: float,
+        raw_yaw: float,
+        camera_raw_x: float,
+        camera_raw_y: float,
+        forward_x: float,
+        forward_y: float,
+    ) -> None:
         self._camera_raw_x = camera_raw_x
         self._camera_raw_y = camera_raw_y
         self._raw_forward_x = forward_x
