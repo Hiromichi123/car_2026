@@ -204,7 +204,10 @@ class WaypointNavigator(Node):
         self.declare_parameter("field_start_y", 2.00)
         self.declare_parameter("field_start_yaw", math.pi / 2.0)
         self.declare_parameter("field_position_yaw_offset", math.pi / 2.0)
+        self.declare_parameter("field_position_scale_x", 1.0)
+        self.declare_parameter("field_position_scale_y", 1.0)
         self.declare_parameter("auto_position_alignment", False)
+        self.declare_parameter("reset_origin_on_start", True)
         self.declare_parameter("waypoint_reach_dist", 8.0)     # 到达航点距离阈值 cm
         self.declare_parameter("final_reach_dist", 5.0)        # 回到A的距离阈值 cm
         self.declare_parameter("kp_angular", 1.8)              # 航向P增益
@@ -226,7 +229,10 @@ class WaypointNavigator(Node):
         self.field_start_y = self.get_parameter("field_start_y").value
         self.field_start_yaw = self.get_parameter("field_start_yaw").value
         self.field_position_yaw_offset = self.get_parameter("field_position_yaw_offset").value
+        self.field_position_scale_x = self.get_parameter("field_position_scale_x").value
+        self.field_position_scale_y = self.get_parameter("field_position_scale_y").value
         self.auto_position_alignment = self.get_parameter("auto_position_alignment").value
+        self.reset_origin_on_start = self.get_parameter("reset_origin_on_start").value
         self.waypoint_reach_dist = self.get_parameter("waypoint_reach_dist").value
         self.final_reach_dist = self.get_parameter("final_reach_dist").value
         self.kp_angular = self.get_parameter("kp_angular").value
@@ -255,6 +261,11 @@ class WaypointNavigator(Node):
         self._origin_yaw = 0.0
         self._heading_yaw_delta = 0.0
         self._position_yaw_delta = self.field_position_yaw_offset
+        self._raw_x = 0.0
+        self._raw_y = 0.0
+        self._raw_yaw = 0.0
+        self._raw_dx = 0.0
+        self._raw_dy = 0.0
         self._last_pose_time = self.get_clock().now()
         self._cmd_seq = 0
         self._task_id = 0
@@ -301,28 +312,23 @@ class WaypointNavigator(Node):
         siny = 2.0 * (q.w * q.z + q.x * q.y)
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         raw_yaw = math.atan2(siny, cosy)
+        self._raw_x = raw_x
+        self._raw_y = raw_y
+        self._raw_yaw = raw_yaw
 
         if not self._local_origin_ready:
-            self._origin_x = raw_x
-            self._origin_y = raw_y
-            self._origin_yaw = raw_yaw
-            self._heading_yaw_delta = self.field_start_yaw - self._origin_yaw
-            if self.auto_position_alignment:
-                self._position_yaw_delta = self._heading_yaw_delta
-            self._local_origin_ready = True
-            self.get_logger().info(
-                f"场地坐标对齐: VIO origin=({raw_x:.2f},{raw_y:.2f}) "
-                f"yaw={math.degrees(raw_yaw):.1f}° -> A=({self.field_start_x:.2f},{self.field_start_y:.2f}), "
-                f"pos_offset={math.degrees(self._position_yaw_delta):.1f}°, "
-                f"heading_offset={math.degrees(self._heading_yaw_delta):.1f}°"
-            )
+            self._reset_field_origin(raw_x, raw_y, raw_yaw, "initial pose")
 
         dx = raw_x - self._origin_x
         dy = raw_y - self._origin_y
+        self._raw_dx = dx
+        self._raw_dy = dy
         cos_d = math.cos(self._position_yaw_delta)
         sin_d = math.sin(self._position_yaw_delta)
-        self._pose_x = self.field_start_x + cos_d * dx - sin_d * dy
-        self._pose_y = self.field_start_y + sin_d * dx + cos_d * dy
+        mapped_x = cos_d * dx - sin_d * dy
+        mapped_y = sin_d * dx + cos_d * dy
+        self._pose_x = self.field_start_x + self.field_position_scale_x * mapped_x
+        self._pose_y = self.field_start_y + self.field_position_scale_y * mapped_y
         self._pose_yaw = self._normalize_angle(raw_yaw + self._heading_yaw_delta)
 
         self._pose_received = True
@@ -335,8 +341,17 @@ class WaypointNavigator(Node):
             self.get_logger().warn(f"忽略非法任务命令: {msg.data}")
             return
 
-        if payload.get("command") == "start" and self._state in ("IDLE", "STOPPED"):
+        command = payload.get("command")
+        if command in ("reset_origin", "set_origin"):
+            if self._pose_received:
+                self._reset_field_origin(self._raw_x, self._raw_y, self._raw_yaw, command)
+                self._publish_status("IDLE", "origin reset at current pose")
+            return
+
+        if command == "start" and self._state in ("IDLE", "STOPPED"):
             self._task_id = int(payload.get("task", 1))
+            if self.reset_origin_on_start and self._pose_received:
+                self._reset_field_origin(self._raw_x, self._raw_y, self._raw_yaw, "mission start")
             self.get_logger().info(f"=== 收到任务{self._task_id}启动指令，开始循线一圈 ===")
             self._state = "FOLLOWING"
             self._wp_index = 0
@@ -497,11 +512,14 @@ class WaypointNavigator(Node):
             dy = wp.y - self._pose_y
             dist = math.hypot(dx, dy)
             cte = self._compute_crosstrack_error(wp)
+            along_track, cross_track = self._straight_progress(wp)
             seg_name = "ARC" if wp.curvature != 0 else "LINE"
             self.get_logger().info(
                 f"[{self._state}] #{self._wp_index}/{len(self.waypoints)-1} "
                 f"目标({wp.x:.2f},{wp.y:.2f}) {seg_name} "
-                f"距离{dist:.2f}m CTE={cte:+.03f}m yaw={math.degrees(self._pose_yaw):.0f}°",
+                f"pos=({self._pose_x:.2f},{self._pose_y:.2f}) raw_d=({self._raw_dx:.2f},{self._raw_dy:.2f}) "
+                f"距离{dist:.2f}m CTE={cte:+.03f}m along={along_track:.2f} cross={cross_track:+.02f} "
+                f"yaw={math.degrees(self._pose_yaw):.0f}°",
                 throttle_duration_sec=2.0,
             )
 
@@ -528,6 +546,17 @@ class WaypointNavigator(Node):
 
     def _publish_status(self, state: str, detail: str) -> None:
         msg = String()
+        wp_x = 0.0
+        wp_y = 0.0
+        dist = 0.0
+        along_track = 0.0
+        cross_track = 0.0
+        if self._wp_index < len(self.waypoints):
+            wp = self.waypoints[self._wp_index]
+            wp_x = wp.x
+            wp_y = wp.y
+            dist = math.hypot(wp.x - self._pose_x, wp.y - self._pose_y)
+            along_track, cross_track = self._straight_progress(wp)
         msg.data = json.dumps({
             "role": "car",
             "task": self._task_id,
@@ -538,8 +567,54 @@ class WaypointNavigator(Node):
             "x": round(self._pose_x, 3),
             "y": round(self._pose_y, 3),
             "yaw": round(self._pose_yaw, 3),
+            "target_x": round(wp_x, 3),
+            "target_y": round(wp_y, 3),
+            "target_dist": round(dist, 3),
+            "along_track": round(along_track, 3),
+            "cross_track": round(cross_track, 3),
+            "raw_x": round(self._raw_x, 3),
+            "raw_y": round(self._raw_y, 3),
+            "raw_dx": round(self._raw_dx, 3),
+            "raw_dy": round(self._raw_dy, 3),
         }, ensure_ascii=False)
         self.status_pub.publish(msg)
+
+    def _reset_field_origin(self, raw_x: float, raw_y: float, raw_yaw: float, reason: str) -> None:
+        self._origin_x = raw_x
+        self._origin_y = raw_y
+        self._origin_yaw = raw_yaw
+        self._heading_yaw_delta = self.field_start_yaw - self._origin_yaw
+        if self.auto_position_alignment:
+            self._position_yaw_delta = self._heading_yaw_delta
+        else:
+            self._position_yaw_delta = self.field_position_yaw_offset
+        self._raw_dx = 0.0
+        self._raw_dy = 0.0
+        self._local_origin_ready = True
+        self.get_logger().info(
+            f"场地坐标对齐({reason}): VIO origin=({raw_x:.2f},{raw_y:.2f}) "
+            f"yaw={math.degrees(raw_yaw):.1f}° -> A=({self.field_start_x:.2f},{self.field_start_y:.2f}), "
+            f"pos_offset={math.degrees(self._position_yaw_delta):.1f}°, "
+            f"heading_offset={math.degrees(self._heading_yaw_delta):.1f}°, "
+            f"scale=({self.field_position_scale_x:.2f},{self.field_position_scale_y:.2f})"
+        )
+
+    def _straight_progress(self, wp: Waypoint) -> tuple[float, float]:
+        if wp.seg_type != SegType.STRAIGHT:
+            return 0.0, 0.0
+
+        seg_dx = wp.x - wp.line_start_x
+        seg_dy = wp.y - wp.line_start_y
+        seg_len = math.hypot(seg_dx, seg_dy)
+        if seg_len < 0.001:
+            return 0.0, 0.0
+
+        ux, uy = seg_dx / seg_len, seg_dy / seg_len
+        rx = self._pose_x - wp.line_start_x
+        ry = self._pose_y - wp.line_start_y
+        along_track = ux * rx + uy * ry
+        cross_track = ux * ry - uy * rx
+        return along_track, cross_track
 
     @staticmethod
     def _normalize_angle(angle: float) -> float:
