@@ -8,7 +8,7 @@
   /cmd_vel (Twist)                      — 差速底盘速度指令
 
 流程:
-  IDLE → 收到启动信号 → FOLLOWING(逐个航点) → 回到A → STOPPED
+  IDLE → 收到启动信号 → START_DELAY(等待5s) → FOLLOWING(逐个航点) → 回到A → STOPPED
 
 坐标系说明:
   - 小车在A点上电，MID360/Point-LIO以当前位姿为原点 → A = (0, 0)
@@ -210,17 +210,28 @@ class WaypointNavigator(Node):
         self.declare_parameter("camera_forward_offset_m", 0.0)
         self.declare_parameter("auto_position_alignment", False)
         self.declare_parameter("reset_origin_on_start", True)
+        self.declare_parameter("mission_start_delay_sec", 5.0)
         self.declare_parameter("waypoint_reach_dist", 11.0)     # 到达航点距离阈值 cm
+        self.declare_parameter("arc_waypoint_reach_dist", 22.0) # 圆弧航点距离阈值 cm
         self.declare_parameter("final_reach_dist", 5.0)        # 回到A的距离阈值 cm
         self.declare_parameter("kp_angular", 1.8)              # 航向P增益
         self.declare_parameter("kp_crosstrack", 1.2)           # 横向误差P增益
         self.declare_parameter("kp_linear", 0.6)               # 线速度p
-        self.declare_parameter("max_linear_speed", 0.3)        # 最大前进速度 m/s
+        self.declare_parameter("max_linear_speed", 0.2)        # 直线段最大前进速度 m/s
+        self.declare_parameter("ab_speed_scale", 0.25)         # AB段速度倍率
+        self.declare_parameter("cd_speed_scale", 2.0)          # CD段速度倍率
+        self.declare_parameter("task2_ab_speed_scale", 2.0)    # 任务2 AB段速度倍率
+        self.declare_parameter("task2_cd_speed_scale", 0.25)   # 任务2 CD段速度倍率
         self.declare_parameter("max_angular_speed", 0.8)       # 最大角速度 rad/s
+        self.declare_parameter("arc_speed_scale", 0.85)        # 圆弧段线速度缩放
+        self.declare_parameter("arc_max_linear_speed", 0.22)   # 圆弧段最大线速度 m/s
+        self.declare_parameter("arc_max_angular_speed", 0.65)  # 圆弧段最大角速度 rad/s
         self.declare_parameter("slow_down_dist", 20.0)         # 接近航点时减速距离 cm
-        self.declare_parameter("lost_timeout", 1.0)            # 定位丢失超时 s
+        self.declare_parameter("lost_timeout", 2.5)            # 定位丢失超时 s
         self.declare_parameter("feedforward_gain", 0.7)        # 曲率前馈增益 (0~1)
         self.declare_parameter("allow_waypoint_overshoot_reach", True)
+        self.declare_parameter("idle_max_local_drift", 0.5)    # 未启动时最大允许定位漂移 m
+        self.declare_parameter("max_abs_pose_z", 0.5)          # 地面车最大允许Z漂移 m
 
         # 读取参数
         self.pose_topic = self.get_parameter("pose_topic").value
@@ -237,17 +248,28 @@ class WaypointNavigator(Node):
         self.camera_forward_offset_m = self.get_parameter("camera_forward_offset_m").value
         self.auto_position_alignment = self.get_parameter("auto_position_alignment").value
         self.reset_origin_on_start = self.get_parameter("reset_origin_on_start").value
+        self.mission_start_delay_sec = self.get_parameter("mission_start_delay_sec").value
         self.waypoint_reach_dist = self.get_parameter("waypoint_reach_dist").value
+        self.arc_waypoint_reach_dist = self.get_parameter("arc_waypoint_reach_dist").value
         self.final_reach_dist = self.get_parameter("final_reach_dist").value
         self.kp_angular = self.get_parameter("kp_angular").value
         self.kp_crosstrack = self.get_parameter("kp_crosstrack").value
         self.kp_linear = self.get_parameter("kp_linear").value
         self.max_linear_speed = self.get_parameter("max_linear_speed").value
+        self.ab_speed_scale = self.get_parameter("ab_speed_scale").value
+        self.cd_speed_scale = self.get_parameter("cd_speed_scale").value
+        self.task2_ab_speed_scale = self.get_parameter("task2_ab_speed_scale").value
+        self.task2_cd_speed_scale = self.get_parameter("task2_cd_speed_scale").value
         self.max_angular_speed = self.get_parameter("max_angular_speed").value
+        self.arc_speed_scale = self.get_parameter("arc_speed_scale").value
+        self.arc_max_linear_speed = self.get_parameter("arc_max_linear_speed").value
+        self.arc_max_angular_speed = self.get_parameter("arc_max_angular_speed").value
         self.slow_down_dist = self.get_parameter("slow_down_dist").value
         self.lost_timeout = self.get_parameter("lost_timeout").value
         self.ff_gain = self.get_parameter("feedforward_gain").value
         self.allow_waypoint_overshoot_reach = self.get_parameter("allow_waypoint_overshoot_reach").value
+        self.idle_max_local_drift = self.get_parameter("idle_max_local_drift").value
+        self.max_abs_pose_z = self.get_parameter("max_abs_pose_z").value
 
         # 航点
         self.waypoints: List[Waypoint] = DEFAULT_WAYPOINTS
@@ -259,6 +281,7 @@ class WaypointNavigator(Node):
         self._pose_y = 0.0
         self._pose_yaw = 0.0
         self._pose_received = False
+        self._pose_valid = False
         self._local_origin_ready = False
         self._origin_x = 0.0
         self._origin_y = 0.0
@@ -277,6 +300,13 @@ class WaypointNavigator(Node):
         self._last_pose_time = self.get_clock().now()
         self._cmd_seq = 0
         self._task_id = 0
+        self._lost_reported = False
+        self._last_cmd_linear = 0.0
+        self._last_cmd_angular = 0.0
+        self._last_angular_ff = 0.0
+        self._last_angular_heading = 0.0
+        self._last_angular_cte = 0.0
+        self._mission_delay_start_time = None
 
         # ---- 发布/订阅 ----
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
@@ -317,6 +347,18 @@ class WaypointNavigator(Node):
     # ==================== 回调 ====================
 
     def _on_lidar_pose(self, msg: LidarPose) -> None:
+        if abs(float(msg.z)) > self.max_abs_pose_z:
+            self.get_logger().warn(
+                f"拒绝异常定位: z={float(msg.z):.2f}m 超过 {self.max_abs_pose_z:.2f}m",
+                throttle_duration_sec=1.0,
+            )
+            self._pose_valid = False
+            self._publish_cmd(0.0, 0.0)
+            self._publish_status("INVALID_POSE", "lidar pose z drift rejected")
+            if self._state == "FOLLOWING":
+                self._enter_localization_lost("lidar pose z drift rejected")
+            return
+
         self._update_raw_pose(
             raw_x=float(msg.x),
             raw_y=float(msg.y),
@@ -375,6 +417,17 @@ class WaypointNavigator(Node):
 
         dx = raw_x - self._origin_x
         dy = raw_y - self._origin_y
+        if self._state != "FOLLOWING" and math.hypot(dx, dy) > self.idle_max_local_drift:
+            self.get_logger().warn(
+                f"拒绝未启动时异常漂移: local=({dx:.2f},{dy:.2f})m "
+                f"超过 {self.idle_max_local_drift:.2f}m",
+                throttle_duration_sec=1.0,
+            )
+            self._pose_valid = False
+            self._publish_cmd(0.0, 0.0)
+            self._publish_status("INVALID_POSE", "idle localization drift rejected")
+            return
+
         self._raw_dx = dx
         self._raw_dy = dy
         cos_d = math.cos(self._position_yaw_delta)
@@ -386,7 +439,10 @@ class WaypointNavigator(Node):
         self._pose_yaw = self._normalize_angle(raw_yaw + self._heading_yaw_delta)
 
         self._pose_received = True
+        self._pose_valid = True
         self._last_pose_time = self.get_clock().now()
+        if self._state != "LOCALIZATION_LOST":
+            self._lost_reported = False
 
     def _on_mission_command(self, msg: String) -> None:
         try:
@@ -402,19 +458,40 @@ class WaypointNavigator(Node):
                 self._publish_status("IDLE", "origin reset at current pose")
             return
 
-        if command == "start" and self._state in ("IDLE", "STOPPED"):
+        if command == "start" and self._state in ("IDLE", "STOPPED", "LOCALIZATION_LOST"):
+            if not self._pose_received or not self._pose_valid:
+                self.get_logger().error("拒绝启动任务: 当前小车定位无效")
+                self._publish_cmd(0.0, 0.0)
+                self._publish_status("INVALID_POSE", "mission start rejected by invalid pose")
+                return
             self._task_id = int(payload.get("task", 1))
             if self.reset_origin_on_start and self._pose_received:
                 self._reset_field_origin(self._raw_x, self._raw_y, self._raw_yaw, "mission start")
-            self.get_logger().info(f"=== 收到任务{self._task_id}启动指令，开始循线一圈 ===")
-            self._state = "FOLLOWING"
+            self.get_logger().info(
+                f"=== 收到任务{self._task_id}启动指令，延迟 {self.mission_start_delay_sec:.1f}s 后开始循线一圈 ==="
+            )
+            self._state = "START_DELAY"
+            self._lost_reported = False
             self._wp_index = 0
+            self._mission_delay_start_time = self.get_clock().now()
+            self._publish_cmd(0.0, 0.0)
             self.state_pub.publish(Bool(data=True))
-            self._publish_status("RUNNING", "mission command accepted")
+            self._publish_status("START_DELAY", "mission command accepted, motor output delayed")
 
     # ==================== 控制循环 50Hz ====================
 
     def _control_loop(self) -> None:
+        if self._state == "START_DELAY":
+            self._publish_cmd(0.0, 0.0)
+            if self._mission_delay_start_time is None:
+                self._mission_delay_start_time = self.get_clock().now()
+            elapsed = (self.get_clock().now() - self._mission_delay_start_time).nanoseconds * 1e-9
+            if elapsed >= self.mission_start_delay_sec:
+                self.get_logger().info("=== 启动延迟结束，开始发送电机速度 ===")
+                self._state = "FOLLOWING"
+                self._publish_status("RUNNING", "start delay complete")
+            return
+
         if self._state != "FOLLOWING":
             if self._state == "IDLE":
                 self._publish_cmd(0.0, 0.0)
@@ -436,10 +513,12 @@ class WaypointNavigator(Node):
 
         # ---- 到达航点判断 ----
         is_final = (self._wp_index == len(self.waypoints) - 1)
-        reach_thresh = (
-            self.final_reach_dist / 100.0 if is_final
-            else self.waypoint_reach_dist / 100.0
-        )
+        if is_final:
+            reach_thresh = self.final_reach_dist / 100.0
+        elif wp.seg_type == SegType.ARC:
+            reach_thresh = self.arc_waypoint_reach_dist / 100.0
+        else:
+            reach_thresh = self.waypoint_reach_dist / 100.0
 
         reached_by_distance = dist < reach_thresh
         reached_by_overshoot = self._has_passed_straight_waypoint(wp, reach_thresh)
@@ -473,7 +552,11 @@ class WaypointNavigator(Node):
             linear *= dist / (self.slow_down_dist / 100.0)
         angle_factor = 1.0 - abs(yaw_error) / math.pi
         linear *= max(0.3, angle_factor)
-        linear = max(0.0, min(self.max_linear_speed, linear))
+        speed_scale = self._segment_speed_scale()
+        linear *= speed_scale
+        linear = max(0.0, min(self.max_linear_speed * speed_scale, linear))
+        if wp.seg_type == SegType.ARC:
+            linear = min(linear * self.arc_speed_scale, self.arc_max_linear_speed)
 
         # 4) 角速度 = 曲率前馈 + 航向修正 + 横向误差修正
         #    前馈: 已知圆弧曲率 → ω = v / R
@@ -484,9 +567,25 @@ class WaypointNavigator(Node):
         angular_cte = self.kp_crosstrack * cte
 
         angular = angular_ff + angular_heading + angular_cte
-        angular = max(-self.max_angular_speed, min(self.max_angular_speed, angular))
+        angular_limit = self.arc_max_angular_speed if wp.seg_type == SegType.ARC else self.max_angular_speed
+        angular = max(-angular_limit, min(angular_limit, angular))
+
+        self._last_angular_ff = angular_ff
+        self._last_angular_heading = angular_heading
+        self._last_angular_cte = angular_cte
 
         self._publish_cmd(linear, angular)
+
+    def _segment_speed_scale(self) -> float:
+        if self._wp_index == 1:
+            if self._task_id == 2:
+                return self.task2_ab_speed_scale
+            return self.ab_speed_scale
+        if self._wp_index == 8:
+            if self._task_id == 2:
+                return self.task2_cd_speed_scale
+            return self.cd_speed_scale
+        return 1.0
 
     # ==================== 横向误差计算 ====================
 
@@ -554,9 +653,17 @@ class WaypointNavigator(Node):
             return
         elapsed = (self.get_clock().now() - self._last_pose_time).nanoseconds * 1e-9
         if elapsed > self.lost_timeout:
-            self.get_logger().error(
-                f"定位丢失 {elapsed:.1f}s，紧急停车！", throttle_duration_sec=2.0)
-            self._publish_cmd(0.0, 0.0)
+            self._enter_localization_lost(f"pose timeout {elapsed:.1f}s")
+
+    def _enter_localization_lost(self, detail: str) -> None:
+        self._publish_cmd(0.0, 0.0)
+        self._pose_valid = False
+        self._state = "LOCALIZATION_LOST"
+        self.state_pub.publish(Bool(data=False))
+        if not self._lost_reported:
+            self.get_logger().error(f"定位丢失，紧急停车: {detail}")
+            self._lost_reported = True
+        self._publish_status("LOCALIZATION_LOST", detail)
 
     def _print_status(self) -> None:
         self._publish_status(self._state, "periodic status")
@@ -573,7 +680,9 @@ class WaypointNavigator(Node):
                 f"目标({wp.x:.2f},{wp.y:.2f}) {seg_name} "
                 f"pos=({self._pose_x:.2f},{self._pose_y:.2f}) raw_d=({self._raw_dx:.2f},{self._raw_dy:.2f}) "
                 f"距离{dist:.2f}m CTE={cte:+.03f}m along={along_track:.2f} cross={cross_track:+.02f} "
-                f"yaw={math.degrees(self._pose_yaw):.0f}°",
+                f"yaw={math.degrees(self._pose_yaw):.0f}° "
+                f"cmd=({self._last_cmd_linear:.2f},{self._last_cmd_angular:.2f}) "
+                f"w_ff/head/cte=({self._last_angular_ff:.2f},{self._last_angular_heading:.2f},{self._last_angular_cte:.2f})",
                 throttle_duration_sec=2.0,
             )
 
@@ -584,10 +693,12 @@ class WaypointNavigator(Node):
         cmd.linear.x = linear_x
         cmd.angular.z = angular_z
         self.cmd_pub.publish(cmd)
+        self._last_cmd_linear = linear_x
+        self._last_cmd_angular = angular_z
         self._cmd_seq += 1
 
     def _publish_carrier_pose(self) -> None:
-        if not self._pose_received:
+        if not self._pose_received or not self._pose_valid:
             return
         msg = LidarPose()
         msg.x = float(self._pose_x)

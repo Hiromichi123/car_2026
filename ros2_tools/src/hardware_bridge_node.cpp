@@ -52,9 +52,11 @@ public:
         // 声明参数
         this->declare_parameter<std::string>("serial_port", DEFAULT_SERIAL_PORT);
         this->declare_parameter<int>("baud_rate", DEFAULT_BAUD_RATE);
+        this->declare_parameter<double>("cmd_timeout_sec", 0.5);
         // 获取参数
         serial_port_ = this->get_parameter("serial_port").as_string();
         baud_rate_ = this->get_parameter("baud_rate").as_int();
+        cmd_timeout_sec_ = this->get_parameter("cmd_timeout_sec").as_double();
 
         // 初始化串口
         enable_serial_ = true;
@@ -77,17 +79,17 @@ public:
         // cmd_vel定时器 50hz
         send_timer_ = this->create_wall_timer(std::chrono::milliseconds(20), std::bind(&HardwareBridgeNode::sendCommandTimer, this));
 
-        float timeout = 5;
-        // 看门狗定时器 - 如果5s内未收到cmd_vel，则停止电机
+        // 看门狗定时器 - 如果一段时间内未收到cmd_vel，则停止电机
         watchdog_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100),
-            [this, timeout]() {
-                watchdogCallback(timeout);
+            [this]() {
+                watchdogCallback();
             }
         );
 
         RCLCPP_INFO(this->get_logger(), "硬件桥接节点已启动");
         RCLCPP_INFO(this->get_logger(), "串口: %s", enable_serial_ ? "已启用" : "已禁用");
+        RCLCPP_INFO(this->get_logger(), "cmd_vel超时停车: %.2f 秒", cmd_timeout_sec_);
     }
 
     ~HardwareBridgeNode() {
@@ -207,9 +209,9 @@ private:
     }
 
     // 检查是否长时间未收到命令未启用
-    void watchdogCallback(float timeout = 0.5) {
+    void watchdogCallback() {
         auto elapsed = this->now() - last_cmd_time_;
-        if (elapsed.seconds() > timeout && cmd_received_) {
+        if (elapsed.seconds() > cmd_timeout_sec_ && cmd_received_) {
             current_vx_ = 0.0;
             current_vy_ = 0.0;
             current_omega_ = 0.0;
@@ -246,6 +248,7 @@ private:
     std::string serial_port_;
     int baud_rate_;
     bool enable_serial_;
+    double cmd_timeout_sec_{0.5};
 
     // 机器人参数
     double max_linear_speed_;

@@ -69,14 +69,18 @@ def generate_launch_description():
     lidar_data_node = Node(
         package="ros2_tools",
         executable="lidar_data_node",
-        name="lidar_data_node",
+        name="car_lidar_data_node",
         output="screen",
+        remappings=[
+            ("lidar_data", "/car/lidar_data"),
+        ],
         parameters=[{
             "use_simulation": False,
             "simulation_odom_topic": "/absolute_pose",
             "real_robot_odom_topic": LaunchConfiguration("real_robot_odom_topic"),
             "lidar_forward_offset_m": 0.135,
             "reset_origin_on_start": True,
+            "max_valid_z_m": 0.5,
         }],
     )
 
@@ -84,7 +88,7 @@ def generate_launch_description():
     hardware_bridge_node = Node(
         package="ros2_tools",
         executable="hardware_bridge_node",
-        name="hardware_bridge_node",
+        name="car_hardware_bridge_node",
         output="screen",
         parameters=[{
             "serial_port": LaunchConfiguration("serial_port"),
@@ -96,11 +100,11 @@ def generate_launch_description():
     waypoint_nav_node = Node(
         package="line_follower",
         executable="waypoint_nav_py",
-        name="waypoint_navigator",
+        name="car_waypoint_navigator",
         output="screen",
         parameters=[{
             "mission_command_topic": "/mission/command",
-            "pose_topic": "/lidar_data",
+            "pose_topic": "/car/lidar_data",
             "pose_source": "lidar_pose",
             "carrier_pose_topic": "/carrier/lidar_pose",
             "car_status_topic": "/car/status",
@@ -111,14 +115,27 @@ def generate_launch_description():
             "camera_forward_offset_m": 0.0,
             "auto_position_alignment": False,
             "reset_origin_on_start": True,
+            "mission_start_delay_sec": 5.0,
             "waypoint_reach_dist": 11.0,
+            "arc_waypoint_reach_dist": 22.0,
             "final_reach_dist": 5.0,
-            "kp_angular": 2.4,
-            "kp_linear": 0.55,
-            "max_linear_speed": 0.3,
-            "max_angular_speed": 0.8,
+            "kp_angular": 1.5,
+            "kp_crosstrack": 0.8,
+            "kp_linear": 0.45,
+            "max_linear_speed": 0.20,
+            "ab_speed_scale": 0.25,
+            "cd_speed_scale": 2.0,
+            "task2_ab_speed_scale": 2.0,
+            "task2_cd_speed_scale": 0.25,
+            "max_angular_speed": 0.6,
+            "feedforward_gain": 0.45,
+            "arc_speed_scale": 0.85,
+            "arc_max_linear_speed": 0.22,
+            "arc_max_angular_speed": 0.65,
             "slow_down_dist": 20.0,
-            "lost_timeout": 1.0,
+            "lost_timeout": 2.5,
+            "idle_max_local_drift": 0.5,
+            "max_abs_pose_z": 0.5,
         }],
     )
 

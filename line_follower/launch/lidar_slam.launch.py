@@ -64,14 +64,18 @@ def generate_launch_description():
     lidar_data_node = Node(
         package="ros2_tools",
         executable="lidar_data_node",
-        name="lidar_data_node",
+        name="car_lidar_data_node",
         output="screen",
+        remappings=[
+            ("lidar_data", "/car/lidar_data"),
+        ],
         parameters=[{
             "use_simulation": False,
             "simulation_odom_topic": "/absolute_pose",
             "real_robot_odom_topic": LaunchConfiguration("real_robot_odom_topic"),
             "lidar_forward_offset_m": 0.135,
             "reset_origin_on_start": True,
+            "max_valid_z_m": 0.5,
         }],
     )
 
