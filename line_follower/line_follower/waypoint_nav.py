@@ -203,6 +203,7 @@ class WaypointNavigator(Node):
         self.declare_parameter("car_status_topic", "/car/status")
         self.declare_parameter("field_start_x", 1.50)
         self.declare_parameter("field_start_y", 2.00)
+        self.declare_parameter("waypoint_homothety_scale", 1.05)
         self.declare_parameter("field_start_yaw", math.pi / 2.0)
         self.declare_parameter("field_position_yaw_offset", math.pi / 2.0)
         self.declare_parameter("field_position_scale_x", 1.0)
@@ -214,14 +215,14 @@ class WaypointNavigator(Node):
         self.declare_parameter("waypoint_reach_dist", 11.0)     # 到达航点距离阈值 cm
         self.declare_parameter("arc_waypoint_reach_dist", 22.0) # 圆弧航点距离阈值 cm
         self.declare_parameter("final_reach_dist", 5.0)        # 回到A的距离阈值 cm
-        self.declare_parameter("kp_angular", 1.8)              # 航向P增益
-        self.declare_parameter("kp_crosstrack", 1.2)           # 横向误差P增益
-        self.declare_parameter("kp_linear", 0.6)               # 线速度p
+        self.declare_parameter("kp_angular", 3.6)              # 航向P增益
+        self.declare_parameter("kp_crosstrack", 2.4)           # 横向误差P增益
+        self.declare_parameter("kp_linear", 1.2)               # 线速度p
         self.declare_parameter("max_linear_speed", 0.2)        # 直线段最大前进速度 m/s
         self.declare_parameter("ab_speed_scale", 0.25)         # AB段速度倍率
         self.declare_parameter("cd_speed_scale", 2.0)          # CD段速度倍率
         self.declare_parameter("task2_ab_speed_scale", 2.0)    # 任务2 AB段速度倍率
-        self.declare_parameter("task2_cd_speed_scale", 0.25)   # 任务2 CD段速度倍率
+        self.declare_parameter("task2_cd_speed_scale", 0.5)    # 任务2 CD段速度倍率
         self.declare_parameter("max_angular_speed", 0.8)       # 最大角速度 rad/s
         self.declare_parameter("arc_speed_scale", 0.85)        # 圆弧段线速度缩放
         self.declare_parameter("arc_max_linear_speed", 0.22)   # 圆弧段最大线速度 m/s
@@ -241,6 +242,7 @@ class WaypointNavigator(Node):
         self.car_status_topic = self.get_parameter("car_status_topic").value
         self.field_start_x = self.get_parameter("field_start_x").value
         self.field_start_y = self.get_parameter("field_start_y").value
+        self.waypoint_homothety_scale = self.get_parameter("waypoint_homothety_scale").value
         self.field_start_yaw = self.get_parameter("field_start_yaw").value
         self.field_position_yaw_offset = self.get_parameter("field_position_yaw_offset").value
         self.field_position_scale_x = self.get_parameter("field_position_scale_x").value
@@ -272,7 +274,12 @@ class WaypointNavigator(Node):
         self.max_abs_pose_z = self.get_parameter("max_abs_pose_z").value
 
         # 航点
-        self.waypoints: List[Waypoint] = DEFAULT_WAYPOINTS
+        self.waypoints: List[Waypoint] = self._make_homothetic_waypoints(
+            DEFAULT_WAYPOINTS,
+            self.field_start_x,
+            self.field_start_y,
+            self.waypoint_homothety_scale,
+        )
 
         # ---- 状态 ----
         self._state = "IDLE"
@@ -334,6 +341,7 @@ class WaypointNavigator(Node):
             f"  航母位姿: {self.carrier_pose_topic}\n"
             f"  航点数: {len(self.waypoints)}\n"
             f"  弧段中间点: {ARC_STEPS}/半圆\n"
+            f"  航点位似: A=({self.field_start_x:.2f},{self.field_start_y:.2f}), scale={self.waypoint_homothety_scale:.3f}\n"
             f"  前馈增益: {self.ff_gain}, 横向误差增益: {self.kp_crosstrack}\n"
             f"  等待启动指令..."
         )
@@ -588,6 +596,53 @@ class WaypointNavigator(Node):
         return 1.0
 
     # ==================== 横向误差计算 ====================
+
+    @staticmethod
+    def _scale_point_from_origin(x: float, y: float, origin_x: float, origin_y: float, scale: float) -> tuple[float, float]:
+        return (
+            origin_x + (x - origin_x) * scale,
+            origin_y + (y - origin_y) * scale,
+        )
+
+    def _make_homothetic_waypoints(
+        self,
+        waypoints: List[Waypoint],
+        origin_x: float,
+        origin_y: float,
+        scale: float,
+    ) -> List[Waypoint]:
+        if abs(scale - 1.0) < 1.0e-6:
+            return list(waypoints)
+
+        scaled: List[Waypoint] = []
+        for wp in waypoints:
+            x, y = self._scale_point_from_origin(wp.x, wp.y, origin_x, origin_y, scale)
+            line_start_x, line_start_y = self._scale_point_from_origin(
+                wp.line_start_x,
+                wp.line_start_y,
+                origin_x,
+                origin_y,
+                scale,
+            )
+            arc_center_x, arc_center_y = self._scale_point_from_origin(
+                wp.arc_center_x,
+                wp.arc_center_y,
+                origin_x,
+                origin_y,
+                scale,
+            )
+            scaled.append(Waypoint(
+                x=x,
+                y=y,
+                curvature=wp.curvature / scale if wp.seg_type == SegType.ARC and abs(scale) > 1.0e-6 else wp.curvature,
+                seg_type=wp.seg_type,
+                line_start_x=line_start_x,
+                line_start_y=line_start_y,
+                arc_center_x=arc_center_x,
+                arc_center_y=arc_center_y,
+                arc_radius=wp.arc_radius * scale if wp.seg_type == SegType.ARC else wp.arc_radius,
+            ))
+        return scaled
 
     def _compute_crosstrack_error(self, wp: Waypoint) -> float:
         """
